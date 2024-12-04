@@ -18,12 +18,11 @@ func RegisterRoutes() *http.ServeMux {
 
 	// Définir les routes
 	mux.HandleFunc("/login", handlers.LoginHandler(service))
-	mux.HandleFunc("/account", handlers.AccountHandler(service))
+	mux.HandleFunc("/logout", handlers.LogoutHandler(service))
+	mux.HandleFunc("/account/balance", handlers.AccountBalanceHandler(service))
 	mux.HandleFunc("/account/symbol", handlers.AccountSymbolHandler(service))
-	mux.HandleFunc("/account/summary", handlers.AccountSummaryHandler(service))
-	mux.HandleFunc("/account/order", handlers.AccountOrderHandler(service))
-	mux.HandleFunc("/account/place-order", handlers.NewOrderHandler(service))
-	mux.HandleFunc("/account/position", handlers.AccountPositionHandler(service))
-	mux.HandleFunc("/order/cancel", handlers.AccountPositionHandler(service))
+	mux.HandleFunc("/order/new", handlers.NewOrderHandler(service))
+	mux.HandleFunc("/order/cancel", handlers.CancelOrderHandler(service))
+	
 	return mux
 }

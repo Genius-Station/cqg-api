@@ -1,74 +1,155 @@
 package handlers
 
 import (
-	wsService "cqg-api/internal/websocket"
+	"context"
+	"cqg-api/internal/websocket"
+	"cqg-api/pkg/cqgapi"
 	"cqg-api/pkg/utils"
 	"cqg-api/protos/WebAPI"
-	"cqg-api/protos/WebAPI/common"
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"time"
-	"google.golang.org/protobuf/types/known/timestamppb"
 
+	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
 )
 
-func AccountHandler(service *wsService.WebSocketService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		userID := "userName1"
+func  LoginHandler(service *wsService.WebSocketService) http.HandlerFunc { 
+	return func (w http.ResponseWriter, r *http.Request) {
+
+		if r.Method != http.MethodPost {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
+		var loginParams struct {
+            Username string `json:"username"`
+            Password string `json:"password"`
+        }
+
+        err := json.NewDecoder(r.Body).Decode(&loginParams)
+        if err != nil {
+            http.Error(w, "Invalide data", http.StatusBadRequest)
+            return
+        }
+
+		if loginParams.Username == "" {
+			http.Error(w, "Param username required", http.StatusBadRequest)
+			return 
+		}
+		if loginParams.Password == "" {
+			http.Error(w, "Param password required", http.StatusBadRequest)
+			return
+		}
 		
-		balancesRequest := &WebAPI.LastStatementBalancesRequest{}
-		informationRequest := &WebAPI.InformationRequest{
-			Id:                           utils.GenerateMsgID(),
-			LastStatementBalancesRequest: balancesRequest,
+		serverURL := os.Getenv("URL_WS_CQG")
+		userName := loginParams.Username
+		password := loginParams.Password
+		clientAppId := os.Getenv("APP_ID_WS_CQG")
+		clientVersion := "python-client-test-2-1"
+		protocolVersionMajor := int32(2)
+		protocolVersionMinor := int32(90)
+		sessionSettings := proto.Uint32(uint32(*WebAPI.Logon_SESSION_SETTING_ALLOW_SESSION_RESTORE.Enum()))
+	
+		// Création du message Logon
+		logon := &WebAPI.Logon{
+			UserName:             utils.StringPtr(userName),
+			Password:             utils.StringPtr(password),
+			ClientAppId:          utils.StringPtr(clientAppId),
+			ClientVersion:        utils.StringPtr(clientVersion),
+			ProtocolVersionMajor: utils.Uint32Ptr(protocolVersionMajor),
+			ProtocolVersionMinor: utils.Uint32Ptr(protocolVersionMinor),
+			SessionSettings:      []uint32{*sessionSettings},
 		}
-
+	
 		clientMsg := &WebAPI.ClientMsg{
-			InformationRequests: []*WebAPI.InformationRequest{informationRequest},
+			Logon: logon,
+		}
+	
+		encodedMessage, err := proto.Marshal(clientMsg)
+		if err != nil {
+			log.Fatalf("Erreur lors de l'encodage du message: %v", err)
+		}
+	
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+	
+		dialer := websocket.DefaultDialer
+		ws, _, err := dialer.DialContext(ctx, serverURL, nil)
+		if err != nil {
+			log.Fatalf("Erreur lors de la connexion au serveur WebSocket: %v", err)
+		}
+		//defer ws.Close()
+	
+		
+		// Envoi du message
+		err = ws.WriteMessage(websocket.BinaryMessage, encodedMessage)
+		if err != nil {
+			log.Fatalf("Erreur lors de l'envoi du message: %v", err)
+		}
+	
+		log.Println("Message envoyé, en attente de la réponse...")
+	
+		// Lecture de la réponse
+		_, response, err := ws.ReadMessage()
+		if err != nil {
+			log.Fatalf("Erreur lors de la réception de la réponse: %v", err)
+		}
+	
+		log.Printf("Réponse reçue (encodée) : %v\n", response)
+	
+		// Décodez la réponse si elle utilise un message Protobuf
+		receivedMsg := &WebAPI.ServerMsg{}
+		err = proto.Unmarshal(response, receivedMsg)
+		if err != nil {
+			log.Fatalf("Erreur lors du décodage de la réponse : %v", err)
+		}
+	
+		log.Printf("Réponse décodée : %+v\n", receivedMsg)
+	
+	
+		userID := "userName1" 
+		if *receivedMsg.LogonResult.ResultCode == uint32(*WebAPI.LogonResult_RESULT_CODE_SUCCESS.Enum()) {
+
+			
+			clientConn := &wsService.ClientConnection{
+				UserID: userID,
+				Conn:   ws,
+				SessionToken: *receivedMsg.LogonResult.SessionToken,
+			}
+	
+			service.Register(clientConn)
 		}
 
-		 // Utiliser le service pour envoyer et recevoir
-		 messageTypes := []string{"InformationReports"}
-		 response, err := service.SendAndReceiveMessage(userID, clientMsg, messageTypes)
-		 if err != nil {
-			 log.Printf("Erreur : %v", err)
-			 http.Error(w, err.Error(), http.StatusInternalServerError)
-			 return
-		 }
- 
-		 // Retourner la réponse au client
-		 w.Header().Set("Content-Type", "application/json")
-		 if err := json.NewEncoder(w).Encode(response); err != nil {
-			 log.Printf("Erreur lors de l'encodage de la réponse JSON : %v", err)
-			 http.Error(w, "Erreur interne du serveur", http.StatusInternalServerError)
-		 }
+		
+		json.NewEncoder(w).Encode(receivedMsg)
+
+		// souscription orders position et summary 
+	//	cqgapi.TradeSubscriptions(service,userID)
+		cqgapi.SymbolSubscriptions(service,userID, []string{"ZUC","ZUT","ZUI"})
 
 	}
-}
+} 
 
-func AccountSummaryHandler(service *wsService.WebSocketService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
+func  LogoutHandler(service *wsService.WebSocketService) http.HandlerFunc { 
+	return func (w http.ResponseWriter, r *http.Request) {
+
+		if r.Method != http.MethodPost {
+            http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+            return
+        }
+
 		userID := "userName1"
-		
 
-		accountSummaryParameters := &WebAPI.AccountSummaryParameters{
-		 	RequestedFields: []uint32{6, 7, 8, 9, 10, 11, 12, 13}, 
+		logon := &WebAPI.Logoff{}
+	
+		clientMsg := &WebAPI.ClientMsg{
+			Logoff: logon,
 		}
-
-		tradeSubscription := &WebAPI.TradeSubscription{
-		 	Id:                   proto.Uint32(12345), 
-		 	SubscriptionScopes:   []uint32{4,1},
-		 	Subscribe:            proto.Bool(true),   
-		 	AccountSummaryParameters: accountSummaryParameters,
-		}
-
-		 clientMsg := &WebAPI.ClientMsg{
-		 	TradeSubscriptions: []*WebAPI.TradeSubscription{tradeSubscription},
-		}
-
-		// Utiliser le service pour envoyer et recevoir
-		messageTypes := []string{"TradeSubscriptionStatuses"}
+	
+		messageTypes := []string{"LoggedOff"}
 		response, err := service.SendAndReceiveMessage(userID, clientMsg, messageTypes)
 		if err != nil {
 			log.Printf("Erreur : %v", err)
@@ -76,42 +157,7 @@ func AccountSummaryHandler(service *wsService.WebSocketService) http.HandlerFunc
 			return
 		}
 
-		// Retourner la réponse au client
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			log.Printf("Erreur lors de l'encodage de la réponse JSON : %v", err)
-			http.Error(w, "Erreur interne du serveur", http.StatusInternalServerError)
-		}
-
-	}
-}
-
-func AccountSymbolHandler(service *wsService.WebSocketService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		userID := "userName1"
-		
-		symbolResolutionRequests :=  &WebAPI.SymbolResolutionRequest{
-			Symbol: proto.String("F.US.ZUI"),
-		}
-
-		informationRequests := &WebAPI.InformationRequest{
-			Id:  proto.Uint32(1),
-			Subscribe: proto.Bool(true), 
-			SymbolResolutionRequest: symbolResolutionRequests,
-		}
-
-		clientMsg := &WebAPI.ClientMsg{
-			InformationRequests: []*WebAPI.InformationRequest{informationRequests},
-		}
-
-		// Utiliser le service pour envoyer et recevoir
-		messageTypes := []string{"InformationReports"}
-		response , err := service.SendAndReceiveMessage(userID, clientMsg, messageTypes)
-		if err != nil {
-			log.Printf("Erreur : %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+		service.Disconnect(userID)
 
 		// Retourner la réponse au client
 		w.Header().Set("Content-Type", "application/json")
@@ -121,157 +167,5 @@ func AccountSymbolHandler(service *wsService.WebSocketService) http.HandlerFunc 
 		}
 
 	}
-}
+} 
 
-func AccountOrderHandler(service *wsService.WebSocketService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		userID := "userName1"
-		
-	   tradeSubscription := &WebAPI.TradeSubscription{
-			Id:                   utils.GenerateMsgID(), 
-			SubscriptionScopes:   []uint32{1},
-			Subscribe:            proto.Bool(true),   
-	   }
-
-		clientMsg := &WebAPI.ClientMsg{
-			TradeSubscriptions: []*WebAPI.TradeSubscription{tradeSubscription},
-	   }
-
-		// Utiliser le service pour envoyer et recevoir
-		messageTypes := []string{"test"}
-		response, err := service.SendAndReceiveMessage(userID, clientMsg, messageTypes)
-		if err != nil {
-			log.Printf("Erreur : %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Retourner la réponse au client
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			log.Printf("Erreur lors de l'encodage de la réponse JSON : %v", err)
-			http.Error(w, "Erreur interne du serveur", http.StatusInternalServerError)
-		}
-
-	}
-}
-
-func AccountPositionHandler(service *wsService.WebSocketService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		userID := "userName1"
-		
-	   tradeSubscription := &WebAPI.TradeSubscription{
-			Id:                   utils.GenerateMsgID(), 
-			SubscriptionScopes:   []uint32{2,1},
-			Subscribe:            proto.Bool(true),   
-	   }
-
-		clientMsg := &WebAPI.ClientMsg{
-			TradeSubscriptions: []*WebAPI.TradeSubscription{tradeSubscription},
-	   }
-
-		// Utiliser le service pour envoyer et recevoir
-		messageTypes := []string{"PositionStatuses"}
-		response, err := service.SendAndReceiveMessage(userID, clientMsg, messageTypes)
-		if err != nil {
-			log.Printf("Erreur : %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Retourner la réponse au client
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			log.Printf("Erreur lors de l'encodage de la réponse JSON : %v", err)
-			http.Error(w, "Erreur interne du serveur", http.StatusInternalServerError)
-		}
-
-	}
-}
-
-func NewOrderHandler(service *wsService.WebSocketService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		// Identifier l'utilisateur
-		userID := "userName1"
-
-		// Paramètres pour la requête NewOrder
-		requestID := utils.GenerateMsgID()
-		accountID :=  proto.Int32(17795820)
-		contractID := proto.Uint32(1)
-		clOrderID := proto.String("20")
-		orderType := proto.Uint32(uint32(*WebAPI.Order_ORDER_TYPE_MKT.Enum()))  // WebAPI.Order_ORDER_TYPE_LMT
-		duration := proto.Uint32(2) // WebAPI.Order_DURATION_GTC
-		side := proto.Uint32(1) // WebAPI.Order_SIDE_BUY
-		qtySignificant := int64(1000)
-		qtyExponent := int32(-2)
-		isManual := proto.Bool(false)
-
-		// Créer le champ qty en utilisant cqg.Decimal
-		decimal := &common.Decimal{
-			Significand: proto.Int64(qtySignificant),
-			Exponent:   proto.Int32(qtyExponent),
-		}
-
-		// Ajouter un horodatage
-		timestamp := timestamppb.New(time.Now())
-
-		// Ajouter les attributs supplémentaires
-		// extraAttributes := []*common.NamedValue{
-		// 	{
-		// 		Name:  proto.String("ALGO_CQG_cost_model"),
-		// 		Value:  proto.String("1"),
-		// 	},
-		// 	{
-		// 		Name:  proto.String("ALGO_CQG_percent_of_volume"),
-		// 		Value: proto.String("0"),
-		// 	},
-		// }
-
-		// Construire l'ordre
-		order := &WebAPI.Order{
-			AccountId:       accountID,
-			WhenUtcTimestamp: timestamp,
-			ContractId:      contractID,
-			ClOrderId:       clOrderID,
-			OrderType:       orderType,
-			ScaledLimitPrice: proto.Int64(10),
-			Duration:        duration,
-			Side:            side,
-			Qty:             decimal,
-			IsManual:        isManual,
-		//	AlgoStrategy:    proto.String("CQG ARRIVALPRICE"),
-		//	ExtraAttributes: extraAttributes,
-		}
-
-		// Créer la requête NewOrder
-		newOrder := &WebAPI.NewOrder{
-			Order: order,
-		}
-
-		orderRequest := &WebAPI.OrderRequest{
-			RequestId: requestID,
-			NewOrder:  newOrder,
-		}
-
-		// Créer le message ClientMsg
-		clientMsg := &WebAPI.ClientMsg{
-			OrderRequests: []*WebAPI.OrderRequest{orderRequest},
-		}
-
-		// Envoyer le message via WebSocket
-		messageTypes := []string{"OrderStatuses", "OrderRequestRejects"}
-		response, err := service.SendAndReceiveMessage(userID, clientMsg, messageTypes)
-		if err != nil {
-			log.Printf("Erreur : %v", err)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		// Retourner la réponse au client
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(response); err != nil {
-			log.Printf("Erreur lors de l'encodage de la réponse JSON : %v", err)
-			http.Error(w, "Erreur interne du serveur", http.StatusInternalServerError)
-		}
-	}
-}

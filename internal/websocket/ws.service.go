@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"context"
 	"time"
+	"os"
 
 
 	"cqg-api/protos/WebAPI"
@@ -30,7 +31,92 @@ type ClientConnection struct {
 	Conn   *websocket.Conn
 	SessionToken  string
 	ResponseChan chan proto.Message 
+	IsDisconnected bool
+	subscriptions   map[string]uint32
+	reverseMap      map[uint32]string
+	subMu           sync.RWMutex 
 }
+
+func (service *WebSocketService) AddSubscription(userID string , symbol string, contractID uint32) {
+
+	clientConn, exists := service.GetConnection(userID)
+    if !exists {
+        return  
+    }
+
+    clientConn.subMu.Lock()
+    defer clientConn.subMu.Unlock()
+
+
+    if clientConn.subscriptions == nil {
+        clientConn.subscriptions = make(map[string]uint32)
+    }
+    if clientConn.reverseMap == nil {
+        clientConn.reverseMap = make(map[uint32]string)
+    }
+
+    clientConn.subscriptions[symbol] = contractID
+    clientConn.reverseMap[contractID] = symbol
+}
+
+func  (service *WebSocketService) GetSymbol(userID string ,contractID uint32) (string, bool) {
+    
+	clientConn, exists := service.GetConnection(userID)
+    if !exists {
+        return  "", false
+    }
+
+	clientConn.subMu.RLock()
+    defer clientConn.subMu.RUnlock()
+
+    symbol, exists := clientConn.reverseMap[contractID]
+    return symbol, exists
+}
+
+func  (service *WebSocketService) GetContractID(userID string , symbol string) (uint32, bool) {
+    
+	clientConn, exists := service.GetConnection(userID)
+    if !exists {
+        return 0, false 
+    }
+
+	clientConn.subMu.RLock()
+    defer clientConn.subMu.RUnlock()
+    contractID, exists := clientConn.subscriptions[symbol]
+    return contractID, exists
+}
+
+// GetListContract récupère la liste des contrats (subscriptions) pour un utilisateur donné
+func (service *WebSocketService) GetListContract(userID string) (map[string]uint32, error) {
+ 
+    clientConn, exists := service.GetConnection(userID)
+    if !exists {
+        return nil, fmt.Errorf("utilisateur %s non trouvé", userID)
+    }
+
+    return clientConn.subscriptions, nil
+}
+
+
+
+func  (service *WebSocketService) RemoveSubscription(userID string , symbol string) {
+    clientConn, exists := service.GetConnection(userID)
+    if !exists {
+        return  
+    }
+
+	
+	clientConn.subMu.Lock()
+    defer clientConn.subMu.Unlock()
+
+    if contractID, exists := clientConn.subscriptions[symbol]; exists {
+        delete(clientConn.reverseMap, contractID)
+        delete(clientConn.subscriptions, symbol)
+    }
+}
+
+
+
 
 // Crée un nouveau WebSocketService
 func NewWebSocketService() *WebSocketService {
@@ -64,6 +150,10 @@ func (service *WebSocketService) handleMessages() {
 				conn.Conn.Close()
 				log.Printf("Client %s déconnecté", clientConn.UserID)
 			}
+			if clientConn.ResponseChan != nil {
+				close(clientConn.ResponseChan)
+				log.Printf("Canal de réponse fermé pour l'utilisateur %s", clientConn.UserID)
+			}
 			service.mu.Unlock()
 
 		case message := <-service.broadcast:
@@ -90,7 +180,7 @@ func (service *WebSocketService) SendAndReceiveMessage(userID string, request pr
 
 	err := conn.Conn.WriteControl(websocket.PingMessage, []byte{}, time.Now().Add(1*time.Second))
     if err != nil {
-        log.Printf("Connexion perdue pour l'utilisateur %s: %v", userID, err)
+        log.Printf("Connexion perdue pour l'utilisateur77 %s: %v", userID, err)
 		err :=tryReconnect(conn)
 		if err != nil {
 			log.Printf("Échec de la reconnexion pour le client %s : %v", conn.UserID, err)
@@ -114,7 +204,6 @@ func (service *WebSocketService) SendAndReceiveMessage(userID string, request pr
 	}
 	log.Printf("Message envoyé à %s", userID)
 
-	//TODO
 	responseChan := conn.ResponseChan
 	timeout := time.After(30 * time.Second)
 	
@@ -147,7 +236,7 @@ func (service *WebSocketService) SendAndReceiveMessage(userID string, request pr
 	
 }
 
-func (service *WebSocketService) SendMessageToUser(userID string, message []byte) error {
+func (service *WebSocketService) SendMessage(userID string, request proto.Message) error {
 	service.mu.RLock()
 	defer service.mu.RUnlock()
 
@@ -156,7 +245,13 @@ func (service *WebSocketService) SendMessageToUser(userID string, message []byte
 		return fmt.Errorf("client %s non trouvé", userID)
 	}
 
-	err := conn.Conn.WriteMessage(websocket.TextMessage, message)
+	message, err := proto.Marshal(request)
+	if err != nil {
+		log.Printf("Erreur lors de l'encodage du message Protobuf: %v", err)
+		return fmt.Errorf("erreur d'encodage du message Protobuf: %w", err)
+	}
+
+	err = conn.Conn.WriteMessage(websocket.BinaryMessage, message)
 	if err != nil {
 		return fmt.Errorf("erreur lors de l'envoi à %s: %v", userID, err)
 	}
@@ -166,6 +261,7 @@ func (service *WebSocketService) SendMessageToUser(userID string, message []byte
 
 func (service *WebSocketService) GetConnection(userID string) (*ClientConnection, bool) {
 	service.mu.RLock()
+	log.Printf("DEBUG EXPRESS  %+v",service.clients)
 	conn, exists := service.clients[userID]
 	service.mu.RUnlock()
 
@@ -186,7 +282,7 @@ func (service *WebSocketService) GetResponseChan(userID string) (chan proto.Mess
 
 func (service *WebSocketService) Register(clientConn *ClientConnection) {
 
-	responseChan := make(chan proto.Message, 1)
+	responseChan := make(chan proto.Message, 20) // refléchir au nombre le plus adapté 
 
 	service.muGo.Lock()
 	defer service.muGo.Unlock()
@@ -194,6 +290,11 @@ func (service *WebSocketService) Register(clientConn *ClientConnection) {
 	service.register <- clientConn
 	go func() {
 		for {
+			
+			if clientConn.IsDisconnected {
+				log.Printf("Déconnexion intentionnelle pour le client %s", clientConn.UserID)
+				break
+			}
 
 			response := &WebAPI.ServerMsg{}
 
@@ -210,7 +311,7 @@ func (service *WebSocketService) Register(clientConn *ClientConnection) {
 						log.Printf("Reconnexion réussie pour le client %s", clientConn.UserID)
 					}
 				}
-				break
+				continue
 			}
 
 	
@@ -220,9 +321,41 @@ func (service *WebSocketService) Register(clientConn *ClientConnection) {
 				continue
 			}
 
-			log.Printf("Message TEST reçu de %s:", clientConn.UserID)
+			// gestion des souscription au symbol 
+			if response.InformationReports != nil {	
+				for _, infoReport := range response.InformationReports {
+					if infoReport.SymbolResolutionReport != nil && infoReport.SymbolResolutionReport.ContractMetadata != nil {				
+							metadata := infoReport.SymbolResolutionReport.ContractMetadata
+						service.AddSubscription(
+							clientConn.UserID,
+							*metadata.Title,                                
+							*metadata.ContractId,       
+						)
+					} 
+				}
+			}
+			
+			// gestion des ordres use NATS for broadcaster
+			if response.OrderStatuses != nil {	
 
-			responseChan <- response
+			}
+			// gestion des positions use NATS for broadcaster
+			if response.PositionStatuses != nil {	
+				
+			}
+			// gestion account summary use NATS for broadcaster
+			if response.AccountSummaryStatuses != nil {	
+				
+			}
+
+			log.Printf("Message TEST reçu de %+v:", response)
+
+			// pour éviter que ça bloque ma boucle si le chan est plein 
+			select {
+			case responseChan <- response:
+			default:
+			}
+		
 
 		}
 	}()
@@ -233,12 +366,27 @@ func (service *WebSocketService) Unregister(clientConn *ClientConnection) {
 	service.unregister <- clientConn
 }
 
+func (service *WebSocketService) Disconnect(userID string) {
+   
+    clientConn, exists := service.GetConnection(userID)
+    if exists {
+		clientConn.IsDisconnected = true
+        service.Unregister(clientConn)
+    }
+}
+
 func tryReconnect( clientConn *ClientConnection) error {
+
+	
+	if clientConn.IsDisconnected  {
+		return fmt.Errorf("client disconnected voluntarily")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	dialer := websocket.DefaultDialer
-	ws, _, err := dialer.DialContext(ctx, "wss://demoapi.cqg.com:443", nil)
+	ws, _, err := dialer.DialContext(ctx, os.Getenv("URL_WS_CQG") , nil)
 	if err != nil {
 		return fmt.Errorf("erreur lors de la reconnexion WebSocket : %w", err)
 	}
