@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"cqg-api/cmd/cqg-api/models/queries"
 	"cqg-api/internal/websocket"
 	"cqg-api/pkg/cqgapi"
 	"cqg-api/pkg/utils"
@@ -11,6 +12,9 @@ import (
 	"net/http"
 	"os"
 	"time"
+	"database/sql"
+	"path"
+	"strconv"
 
 	"github.com/gorilla/websocket"
 	"google.golang.org/protobuf/proto"
@@ -168,4 +172,65 @@ func  LogoutHandler(service *wsService.WebSocketService) http.HandlerFunc {
 
 	}
 } 
+
+func CreateAccountHandler(db *sql.DB) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+
+		if r.Method != http.MethodPost {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		var accountPayload queries.AccountPayload
+		err := json.NewDecoder(r.Body).Decode(&accountPayload)
+		if err != nil {
+			http.Error(w, "Bad request: invalid JSON", http.StatusBadRequest)
+			return
+		}
+
+		accountID, err := queries.CreateAccount(db, &accountPayload)
+		if err != nil {
+			log.Printf("Erreur lors de la création du compte : %v", err)
+			http.Error(w, "Erreur interne du serveur", http.StatusInternalServerError)
+			return
+		}
+
+		response := map[string]interface{}{
+			"message": "Compte créé avec succès",
+			"account_id": accountID,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("Erreur lors de l'encodage de la réponse JSON : %v", err)
+			http.Error(w, "Erreur interne du serveur", http.StatusInternalServerError)
+		}
+	}
+}
+
+
+func GetAccountHandler (w http.ResponseWriter, r *http.Request, db *sql.DB){
+	userIDStr := path.Base(r.URL.Path) 
+	userID, err := strconv.ParseInt(userIDStr, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid user_id", http.StatusBadRequest)
+		return
+	}
+
+	account, err := queries.GetAccountByUserID(db, userID)
+	if err != nil {
+		if err.Error() == "account not found" {
+			http.Error(w, "Account not found", http.StatusNotFound)
+		} else {
+			http.Error(w, "Failed to fetch account", http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(account)
+}
+
+
+
 
